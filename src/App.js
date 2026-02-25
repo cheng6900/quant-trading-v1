@@ -41,7 +41,7 @@ import {
 // 1. Firebase 配置 (請在此處貼上你從 Firebase Console 取得的代碼)
 // ========================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyAvnOPdY-Z3ohfbSXmSemR_f2fJUhbONak",
+  apiKey: process.env.REACT_APP_FIREBASE_KEY,
   authDomain: "tradelite-55db5.firebaseapp.com",
   projectId: "tradelite-55db5",
   storageBucket: "tradelite-55db5.firebasestorage.app",
