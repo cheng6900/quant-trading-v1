@@ -61,15 +61,37 @@ if (typeof document !== "undefined") {
     body, #root, .App { 
       background-color: #0f1115 !important; 
     }
-    input { 
-      background-color: #1a1d24 !important; 
-      color: white !important; 
+    /* 炭黑深色質感輸入框 */
+    .input-style {
+      width: 100% !important;
+      background-color: #1a1d24 !important; /* 比背景稍微亮一點點的深灰 */
       border: 1px solid rgba(255, 255, 255, 0.1) !important;
+      border-radius: 12px !important;
+      padding: 12px 16px !important;
+      color: #e2e8f0 !important; /* 柔和的白灰色文字，不刺眼 */
+      font-family: 'JetBrains Mono', monospace !important;
+      outline: none !important;
+      transition: all 0.2s ease !important;
     }
-    /* 修正 Chrome 自動填充的黃色/白色底色 */
+    .input-style:focus {
+      border-color: #3b82f6 !important;
+      background-color: #242832 !important; /* 聚焦時稍微亮一點 */
+      box-shadow: 0 0 0 1px #3b82f6 !important;
+    }
+    /* 讓 Placeholder (提示文字) 變暗 */
+    .input-style::placeholder {
+      color: #4a5568 !important;
+    }
+    /* 移除數字箭頭 */
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+    /* 修正 Google 自動填充 */
     input:-webkit-autofill {
       -webkit-box-shadow: 0 0 0px 1000px #1a1d24 inset !important;
-      -webkit-text-fill-color: white !important;
+      -webkit-text-fill-color: #e2e8f0 !important;
     }
   `;
   document.head.appendChild(style);
@@ -78,6 +100,9 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
+
+  // 新增：手續費折數狀態 (預設 28 折)
+  const [feeDiscount, setFeeDiscount] = useState(0.28);
 
   // UI 狀態
   const [authMode, setAuthMode] = useState("login");
@@ -181,11 +206,30 @@ export default function App() {
     }
   };
 
-  // --- 交易操作 ---
+  // --- 修改儲存邏輯 (自動計算成本) ---
   const saveTrade = async (e) => {
     e.preventDefault();
     if (!user) return;
     try {
+      const entry = parseFloat(formData.entryPrice);
+      const exit = parseFloat(formData.exitPrice);
+      const qty = parseFloat(formData.quantity);
+
+      // 台股成本計算邏輯:
+      // 買進手續費 = 買進金額 * 0.1425% * 折數
+      // 賣出手續費 = 賣出金額 * 0.1425% * 折數
+      // 證交稅 = 賣出金額 * 0.3%
+      const buyFee = Math.max(
+        1,
+        Math.floor(entry * qty * 0.001425 * feeDiscount)
+      );
+      const sellFee = Math.max(
+        1,
+        Math.floor(exit * qty * 0.001425 * feeDiscount)
+      );
+      const tax = Math.floor(exit * qty * 0.003);
+      const totalCost = buyFee + sellFee + tax;
+
       const tradesCollection = collection(
         db,
         "artifacts",
@@ -196,10 +240,11 @@ export default function App() {
       );
       await addDoc(tradesCollection, {
         symbol: formData.symbol.toUpperCase(),
-        entryPrice: parseFloat(formData.entryPrice),
-        exitPrice: parseFloat(formData.exitPrice),
-        quantity: parseFloat(formData.quantity),
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
         date: formData.date,
+        costs: totalCost, // 儲存計算後的成本
         createdAt: Date.now(),
       });
       setShowModal(false);
@@ -226,11 +271,14 @@ export default function App() {
     }
   };
 
-  // --- 計算統計數據 ---
+  // --- 修改統計邏輯 (stats) ---
   const stats = useMemo(() => {
     if (!trades.length)
       return {
         totalProfit: 0,
+        dayProfit: 0,
+        monthProfit: 0,
+        yearProfit: 0,
         winRate: 0,
         pf: 0,
         avgWin: 0,
@@ -238,15 +286,36 @@ export default function App() {
         count: 0,
         chartData: [],
       };
+
+    const now = new Date();
+    const todayStr = now.toISOString().split("T")[0];
+    const thisMonthStr = todayStr.substring(0, 7); // YYYY-MM
+    const thisYearStr = todayStr.substring(0, 4); // YYYY
+
     const wins = trades.filter((t) => t.profit > 0);
     const losses = trades.filter((t) => t.profit < 0);
+
+    // 計算各時段盈虧
+    const dayProfit = trades
+      .filter((t) => t.date === todayStr)
+      .reduce((s, t) => s + t.profit, 0);
+    const monthProfit = trades
+      .filter((t) => t.date.startsWith(thisMonthStr))
+      .reduce((s, t) => s + t.profit, 0);
+    const yearProfit = trades
+      .filter((t) => t.date.startsWith(thisYearStr))
+      .reduce((s, t) => s + t.profit, 0);
     const totalProfit = trades.reduce((sum, t) => sum + t.profit, 0);
+
     const grossProfit = wins.reduce((sum, t) => sum + t.profit, 0);
     const grossLoss = Math.abs(losses.reduce((sum, t) => sum + t.profit, 0));
 
     let cumulative = 0;
     return {
       totalProfit,
+      dayProfit,
+      monthProfit,
+      yearProfit,
       winRate: (wins.length / trades.length) * 100,
       pf:
         grossLoss === 0 ? (grossProfit > 0 ? 99 : 0) : grossProfit / grossLoss,
@@ -372,6 +441,7 @@ export default function App() {
   }
 
   // 主儀表板
+  // --- 這裡是主儀表板的開始 ---
   return (
     <div className="min-h-screen bg-[#0f1115] text-slate-200">
       <header className="border-b border-white/5 bg-[#161920]/80 backdrop-blur-xl sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
@@ -379,14 +449,10 @@ export default function App() {
           <div className="p-2 bg-blue-600 rounded-lg shadow-lg">
             <BarChart3 className="text-white w-5 h-5" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold leading-tight">
-              Performance Quant 量化交易系統
-            </h1>
-            <span className="text-[10px] text-blue-400 font-mono hidden sm:block">
-              CONNECTED TO FIREBASE
-            </span>
-          </div>
+          <h1 className="text-lg font-bold">Performance Quant 量化交易系統</h1>
+          <span className="text-[10px] text-blue-400 font-mono hidden sm:block">
+            CONNECTED TO FIREBASE
+          </span>
         </div>
 
         <div className="flex items-center gap-4">
@@ -416,11 +482,27 @@ export default function App() {
           </button>
         </div>
       </header>
+
       <main className="max-w-7xl mx-auto p-4 md:p-8 space-y-6">
         {/* KPI 卡片 */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <KPIBox
-            title="總損益"
+            title="本日盈虧"
+            value={`$${Math.round(stats.dayProfit).toLocaleString()}`}
+            trend={stats.dayProfit >= 0 ? 1 : -1}
+          />
+          <KPIBox
+            title="本月盈虧"
+            value={`$${Math.round(stats.monthProfit).toLocaleString()}`}
+            trend={stats.monthProfit >= 0 ? 1 : -1}
+          />
+          <KPIBox
+            title="今年盈虧"
+            value={`$${Math.round(stats.yearProfit).toLocaleString()}`}
+            trend={stats.yearProfit >= 0 ? 1 : -1}
+          />
+          <KPIBox
+            title="累積總損益"
             value={`$${Math.round(stats.totalProfit).toLocaleString()}`}
             trend={stats.totalProfit >= 0 ? 1 : -1}
           />
@@ -436,46 +518,38 @@ export default function App() {
           />
           <KPIBox title="總筆數" value={stats.count} trend={0} />
         </div>
-
-        {/* 圖表與操作 */}
+        {/* 圖表與按鈕 */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 bg-[#161920] rounded-3xl p-6 border border-white/5 h-[400px]">
-            <h3 className="text-xs font-bold text-slate-500 mb-8 uppercase tracking-widest flex items-center gap-2">
-              <TrendingUp size={16} className="text-blue-400" /> 資產曲線
-            </h3>
-            <div className="h-[280px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={stats.chartData}>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="#2a2e37"
-                    vertical={false}
-                  />
-                  <XAxis dataKey="date" stroke="#4a5568" fontSize={11} />
-                  <YAxis stroke="#4a5568" fontSize={11} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#1a1d24",
-                      border: "none",
-                      borderRadius: "12px",
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="balance"
-                    stroke="#3b82f6"
-                    strokeWidth={3}
-                    dot={{ fill: "#3b82f6", r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={stats.chartData}>
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="#2a2e37"
+                  vertical={false}
+                />
+                <XAxis dataKey="date" stroke="#4a5568" fontSize={11} />
+                <YAxis stroke="#4a5568" fontSize={11} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: "#1a1d24",
+                    border: "none",
+                    borderRadius: "12px",
+                  }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="balance"
+                  stroke="#3b82f6"
+                  strokeWidth={3}
+                />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
-
           <div className="space-y-4">
             <button
               onClick={() => setShowModal(true)}
-              className="w-full h-32 bg-blue-600 hover:bg-blue-500 rounded-3xl flex flex-col items-center justify-center gap-2 transition shadow-xl shadow-blue-600/20 active:scale-95"
+              className="w-full h-32 bg-blue-600 rounded-3xl flex flex-col items-center justify-center gap-2 shadow-xl shadow-blue-600/20"
             >
               <PlusCircle size={32} className="text-white" />
               <span className="font-bold text-white">新增交易紀錄</span>
@@ -503,35 +577,45 @@ export default function App() {
             </div>
           </div>
         </div>
-
-        {/* 表格 */}
-        <div className="bg-[#161920] rounded-3xl border border-white/5 overflow-hidden shadow-2xl">
+        {/* 表格：確保標題區與表格內容都包在這個 bg-[#161920] 裡面 */}
+        <div className="bg-[#161920] rounded-3xl border border-white/5 overflow-hidden shadow-2xl mt-8">
+          {/* 1. 標題區 */}
           <div className="px-8 py-5 border-b border-white/5 flex justify-between items-center bg-black/10">
             <h3 className="font-bold text-xs tracking-wider uppercase text-slate-400">
               歷史交易明細
             </h3>
           </div>
+
+          {/* 2. 表格內容區 */}
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
                 <tr className="text-slate-500 text-[10px] uppercase tracking-widest bg-white/[0.02]">
                   <th className="px-8 py-4">日期</th>
                   <th className="px-8 py-4">代碼</th>
-                  <th className="px-8 py-4 text-right">損益</th>
-                  <th className="px-8 py-4 text-center">操作</th>
+                  <th className="px-8 py-4 text-right">進場</th>
+                  <th className="px-8 py-4 text-right">出場</th>
+                  <th className="px-8 py-4 text-right">淨損益</th>
+                  <th className="px-8 py-4 text-center">刪除</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {trades.map((t) => (
                   <tr key={t.id} className="hover:bg-white/[0.03] transition">
-                    <td className="px-8 py-4 text-xs font-mono text-slate-500">
+                    <td className="px-8 py-4 text-xs text-slate-500">
                       {t.date}
                     </td>
                     <td className="px-8 py-4 font-bold text-white">
                       {t.symbol}
                     </td>
+                    <td className="px-8 py-4 text-right text-slate-400">
+                      {t.entryPrice}
+                    </td>
+                    <td className="px-8 py-4 text-right text-slate-400">
+                      {t.exitPrice}
+                    </td>
                     <td
-                      className={`px-8 py-4 text-right font-mono font-bold ${
+                      className={`px-8 py-4 text-right font-bold ${
                         t.profit >= 0 ? "text-emerald-400" : "text-rose-400"
                       }`}
                     >
@@ -541,7 +625,7 @@ export default function App() {
                     <td className="px-8 py-4 text-center">
                       <button
                         onClick={() => deleteTrade(t.id)}
-                        className="text-slate-700 hover:text-rose-500 transition p-2"
+                        className="text-slate-700 hover:text-rose-500 p-2"
                       >
                         <Trash2 size={16} />
                       </button>
@@ -551,47 +635,63 @@ export default function App() {
               </tbody>
             </table>
           </div>
-        </div>
+        </div>{" "}
+        {/* <--- 修正點：確保這一個 div 關閉的是最外層的 bg-[#161920] 容器 */}
       </main>
 
-      {/* 新增視窗 (Modal) */}
+      {/* 新增視窗 */}
       {showModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-[100] p-4">
           <div className="bg-[#1a1d24] border border-white/10 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl">
-            <h3 className="text-xl font-bold mb-6 text-white text-center">
-              新增交易紀錄
+            <h3 className="text-xl font-bold mb-8 text-white text-center tracking-tight">
+              手動新增紀錄
             </h3>
-            <form onSubmit={saveTrade} className="space-y-4">
+
+            <form onSubmit={saveTrade} className="space-y-5">
+              {/* 強調顯示手續費折數 */}
+              <div className="bg-blue-600/5 p-4 rounded-2xl border border-blue-600/10">
+                <InputGroup label="手續費折數 (例如 0.28)">
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="input-style mt-1"
+                    value={feeDiscount}
+                    onChange={(e) => setFeeDiscount(e.target.value)}
+                  />
+                </InputGroup>
+              </div>
+
               <InputGroup label="標的代碼">
                 <input
                   required
-                  className="input-style uppercase"
+                  placeholder="2330"
+                  className="input-style mt-1 uppercase"
                   value={formData.symbol}
                   onChange={(e) =>
                     setFormData({ ...formData, symbol: e.target.value })
                   }
-                  placeholder="例如: 2330"
                 />
               </InputGroup>
+
               <div className="grid grid-cols-2 gap-4">
-                <InputGroup label="進場價">
+                <InputGroup label="進場價格">
                   <input
                     required
                     type="number"
                     step="any"
-                    className="input-style"
+                    className="input-style mt-1"
                     value={formData.entryPrice}
                     onChange={(e) =>
                       setFormData({ ...formData, entryPrice: e.target.value })
                     }
                   />
                 </InputGroup>
-                <InputGroup label="出場價">
+                <InputGroup label="出場價格">
                   <input
                     required
                     type="number"
                     step="any"
-                    className="input-style"
+                    className="input-style mt-1"
                     value={formData.exitPrice}
                     onChange={(e) =>
                       setFormData({ ...formData, exitPrice: e.target.value })
@@ -599,23 +699,24 @@ export default function App() {
                   />
                 </InputGroup>
               </div>
+
               <div className="grid grid-cols-2 gap-4">
-                <InputGroup label="數量">
+                <InputGroup label="數量(股)">
                   <input
                     required
                     type="number"
-                    className="input-style"
+                    className="input-style mt-1"
                     value={formData.quantity}
                     onChange={(e) =>
                       setFormData({ ...formData, quantity: e.target.value })
                     }
                   />
                 </InputGroup>
-                <InputGroup label="日期">
+                <InputGroup label="交易日期">
                   <input
                     required
                     type="date"
-                    className="input-style"
+                    className="input-style mt-1"
                     value={formData.date}
                     onChange={(e) =>
                       setFormData({ ...formData, date: e.target.value })
@@ -623,78 +724,55 @@ export default function App() {
                   />
                 </InputGroup>
               </div>
-              <div className="flex gap-4 pt-6">
+
+              <div className="pt-4 space-y-2">
+                <button
+                  type="submit"
+                  className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-bold text-white shadow-lg shadow-blue-600/20 transition-all active:scale-95"
+                >
+                  確認儲存
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="flex-1 font-bold text-slate-500"
+                  className="w-full text-slate-500 text-sm font-medium py-2 hover:text-slate-300 transition-colors"
                 >
                   取消
-                </button>
-                <button
-                  type="submit"
-                  className="flex-[2] bg-blue-600 py-4 rounded-2xl font-bold text-white shadow-lg active:scale-95 transition"
-                >
-                  確認新增
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
-
-      {/* 內嵌樣式 */}
-      <style>{`
-       .input-style {
-        width: 100%; 
-        background-color: #1a1d24 !important; /* 強制深色背景 */
-        border: 1px solid rgba(255, 255, 255, 0.1); 
-        border-radius: 1rem; 
-        padding: 0.8rem 1rem; 
-        color: white !important; /* 強制文字白色 */
-        font-size: 16px;
-      }
-      
-      /* 解決瀏覽器自動填充時變白的問題 */
-      input:-webkit-autofill,
-      input:-webkit-autofill:hover, 
-      input:-webkit-autofill:focus {
-        -webkit-text-fill-color: white !important;
-        -webkit-box-shadow: 0 0 0px 1000px #1a1d24 inset !important;
-        transition: background-color 5000s ease-in-out 0s;
-      }
-      `}</style>
     </div>
   );
 }
 
-// 輔助組件
+// 這些輔助函式要放在最外面 (App 的括號外面)
 function KPIBox({ title, value, trend }) {
-  const colorClass =
+  const color =
     trend > 0 ? "text-emerald-400" : trend < 0 ? "text-rose-400" : "text-white";
   return (
-    <div className="bg-[#161920] border border-white/5 rounded-3xl p-5 shadow-lg">
-      <div className="text-slate-500 text-[10px] font-bold uppercase mb-1 tracking-widest">
+    <div className="bg-[#161920] border border-white/5 rounded-3xl p-5">
+      <div className="text-slate-500 text-[10px] font-bold uppercase mb-1">
         {title}
       </div>
-      <div className={`text-xl font-mono font-bold ${colorClass}`}>{value}</div>
+      <div className={`text-xl font-mono font-bold ${color}`}>{value}</div>
     </div>
   );
 }
-
 function DetailRow({ label, value, color }) {
   return (
     <div className="flex justify-between items-center text-xs">
-      <span className="text-slate-500 font-medium">{label}</span>
-      <span className={`font-mono font-bold ${color}`}>{value}</span>
+      <span className="text-slate-500">{label}</span>
+      <span className={`font-bold ${color}`}>{value}</span>
     </div>
   );
 }
-
 function InputGroup({ label, children }) {
   return (
     <div className="space-y-1">
-      <label className="text-[10px] uppercase font-bold text-slate-500 ml-1 tracking-wider">
+      <label className="text-[10px] uppercase font-bold text-slate-500 ml-1">
         {label}
       </label>
       {children}
