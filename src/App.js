@@ -35,6 +35,7 @@ import {
   addDoc,
   deleteDoc,
   onSnapshot,
+  updateDoc,
 } from "firebase/firestore";
 
 // ========================================================
@@ -61,37 +62,47 @@ if (typeof document !== "undefined") {
     body, #root, .App { 
       background-color: #0f1115 !important; 
     }
-    /* 炭黑深色質感輸入框 */
+    /* 修正後的輸入框樣式 */
     .input-style {
       width: 100% !important;
-      background-color: #1a1d24 !important; /* 比背景稍微亮一點點的深灰 */
+      background-color: #1a1d24 !important;
       border: 1px solid rgba(255, 255, 255, 0.1) !important;
       border-radius: 12px !important;
-      padding: 12px 16px !important;
-      color: #e2e8f0 !important; /* 柔和的白灰色文字，不刺眼 */
+      padding: 0 16px !important; /* 移除上下 padding，改由 height 撐開 */
+      color: #e2e8f0 !important;
       font-family: 'JetBrains Mono', monospace !important;
       outline: none !important;
       transition: all 0.2s ease !important;
+      height: 48px !important; /* 略微增加高度更顯大氣 */
+      display: block !important; /* 回歸區塊元素 */
+      line-height: 48px !important; /* 讓文字垂直置中 */
     }
+
+    /* 專門修復日期輸入框的文字偏移 */
+    input[type="date"] {
+      display: flex !important;
+      align-items: center !important;
+    }
+
+    /* 修復 Chrome/Safari 日期文字跑到底部的問題 */
+    input[type="date"]::-webkit-datetime-edit {
+      padding: 0 !important;
+      height: 100% !important;
+      display: flex !important;
+      align-items: center !important;
+      line-height: 1 !important;
+    }
+
+    /* 讓日曆圖示亮一點 */
+    input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(1);
+      opacity: 0.5;
+      cursor: pointer;
+    }
+
     .input-style:focus {
       border-color: #3b82f6 !important;
-      background-color: #242832 !important; /* 聚焦時稍微亮一點 */
       box-shadow: 0 0 0 1px #3b82f6 !important;
-    }
-    /* 讓 Placeholder (提示文字) 變暗 */
-    .input-style::placeholder {
-      color: #4a5568 !important;
-    }
-    /* 移除數字箭頭 */
-    input::-webkit-outer-spin-button,
-    input::-webkit-inner-spin-button {
-      -webkit-appearance: none;
-      margin: 0;
-    }
-    /* 修正 Google 自動填充 */
-    input:-webkit-autofill {
-      -webkit-box-shadow: 0 0 0px 1000px #1a1d24 inset !important;
-      -webkit-text-fill-color: #e2e8f0 !important;
     }
   `;
   document.head.appendChild(style);
@@ -160,26 +171,33 @@ export default function App() {
       "trades"
     );
 
-    const unsubscribe = onSnapshot(
-      tradesCollection,
-      (snapshot) => {
-        const data = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-          profit:
-            (Number(doc.data().exitPrice) - Number(doc.data().entryPrice)) *
-            Number(doc.data().quantity),
-        }));
-        // 按日期排序
-        setTrades(data.sort((a, b) => new Date(a.date) - new Date(b.date)));
-        setDataLoading(false);
-      },
-      (error) => {
-        console.error("Firestore Error:", error);
-        setDataLoading(false);
-      }
-    );
+    const unsubscribe = onSnapshot(tradesCollection, (snapshot) => {
+      const data = snapshot.docs.map((doc) => {
+        const d = doc.data();
+        const entry = Number(d.entryPrice) || 0;
+        const exit = Number(d.exitPrice) || 0;
+        const qty = Number(d.quantity) || 0;
 
+        // 如果資料庫沒存 costs，就在前端即時算一個大概的（0.1425%*折數 + 0.3%稅）
+        const recordedCosts = Number(d.costs);
+        const fallbackCosts =
+          entry * qty * 0.001425 * 0.28 +
+          exit * qty * 0.001425 * 0.28 +
+          exit * qty * 0.003;
+        const finalCosts = !isNaN(recordedCosts)
+          ? recordedCosts
+          : fallbackCosts;
+
+        return {
+          id: doc.id,
+          ...d,
+          profit: (exit - entry) * qty - finalCosts, // 確保減去成本
+          costs: finalCosts,
+        };
+      });
+      setTrades(data.sort((a, b) => new Date(a.date) - new Date(b.date)));
+      setDataLoading(false);
+    });
     return () => unsubscribe();
   }, [user]);
 
@@ -206,19 +224,25 @@ export default function App() {
     }
   };
 
-  // --- 修改儲存邏輯 (自動計算成本) ---
+  // --- 編輯功能狀態 ---
+  const [editingId, setEditingId] = useState(null);
+  const [editFormData, setEditFormData] = useState({});
+
+  // 點擊編輯按鈕：啟動編輯模式並帶入舊資料
+  const startEdit = (t) => {
+    setEditingId(t.id);
+    setEditFormData({ ...t });
+  };
+
+  // 儲存修改：重新計算損益並更新資料庫
   const saveTrade = async (e) => {
     e.preventDefault();
-    if (!user) return;
     try {
       const entry = parseFloat(formData.entryPrice);
       const exit = parseFloat(formData.exitPrice);
       const qty = parseFloat(formData.quantity);
 
-      // 台股成本計算邏輯:
-      // 買進手續費 = 買進金額 * 0.1425% * 折數
-      // 賣出手續費 = 賣出金額 * 0.1425% * 折數
-      // 證交稅 = 賣出金額 * 0.3%
+      // 計算台股成本 (手續費 + 證交稅)
       const buyFee = Math.max(
         1,
         Math.floor(entry * qty * 0.001425 * feeDiscount)
@@ -238,22 +262,24 @@ export default function App() {
         user.uid,
         "trades"
       );
+
       await addDoc(tradesCollection, {
-        symbol: formData.symbol.toUpperCase(),
+        ...formData,
         entryPrice: entry,
         exitPrice: exit,
         quantity: qty,
-        date: formData.date,
-        costs: totalCost, // 儲存計算後的成本
-        createdAt: Date.now(),
+        symbol: formData.symbol.toUpperCase(),
+        costs: totalCost,
+        createdAt: new Date().toISOString(),
       });
+
       setShowModal(false);
       setFormData({
-        ...formData,
         symbol: "",
         entryPrice: "",
         exitPrice: "",
         quantity: "",
+        date: new Date().toISOString().split("T")[0],
       });
     } catch (err) {
       alert("儲存失敗: " + err.message);
@@ -311,6 +337,7 @@ export default function App() {
     const grossLoss = Math.abs(losses.reduce((sum, t) => sum + t.profit, 0));
 
     let cumulative = 0;
+
     return {
       totalProfit,
       dayProfit,
@@ -328,6 +355,48 @@ export default function App() {
       })),
     };
   }, [trades]);
+  const handleUpdate = async (id) => {
+    try {
+      const entry = parseFloat(editFormData.entryPrice);
+      const exit = parseFloat(editFormData.exitPrice);
+      const qty = parseFloat(editFormData.quantity);
+
+      // 計算台股成本
+      const buyFee = Math.max(
+        1,
+        Math.floor(entry * qty * 0.001425 * feeDiscount)
+      );
+      const sellFee = Math.max(
+        1,
+        Math.floor(exit * qty * 0.001425 * feeDiscount)
+      );
+      const tax = Math.floor(exit * qty * 0.003);
+      const totalCost = buyFee + sellFee + tax;
+
+      const tradeRef = doc(
+        db,
+        "artifacts",
+        APP_ID_PATH,
+        "users",
+        user.uid,
+        "trades",
+        id
+      );
+
+      await updateDoc(tradeRef, {
+        symbol: editFormData.symbol.toUpperCase(),
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
+        date: editFormData.date,
+        costs: totalCost,
+      });
+
+      setEditingId(null);
+    } catch (err) {
+      alert("更新失敗: " + err.message);
+    }
+  };
 
   if (isInitializing) {
     return (
@@ -581,7 +650,7 @@ export default function App() {
         <div className="bg-[#161920] rounded-3xl border border-white/5 overflow-hidden shadow-2xl mt-8">
           {/* 1. 標題區 */}
           <div className="px-8 py-5 border-b border-white/5 flex justify-between items-center bg-black/10">
-            <h3 className="font-bold text-xs tracking-wider uppercase text-slate-400">
+            <h3 className="font-bold text-s tracking-wider uppercase text-slate-400">
               歷史交易明細
             </h3>
           </div>
@@ -595,41 +664,150 @@ export default function App() {
                   <th className="px-8 py-4">代碼</th>
                   <th className="px-8 py-4 text-right">進場</th>
                   <th className="px-8 py-4 text-right">出場</th>
+                  <th className="px-8 py-4 text-right text-blue-400">股數</th>
                   <th className="px-8 py-4 text-right">淨損益</th>
                   <th className="px-8 py-4 text-center">刪除</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {trades.map((t) => (
-                  <tr key={t.id} className="hover:bg-white/[0.03] transition">
-                    <td className="px-8 py-4 text-xs text-slate-500">
-                      {t.date}
-                    </td>
-                    <td className="px-8 py-4 font-bold text-white">
-                      {t.symbol}
-                    </td>
-                    <td className="px-8 py-4 text-right text-slate-400">
-                      {t.entryPrice}
-                    </td>
-                    <td className="px-8 py-4 text-right text-slate-400">
-                      {t.exitPrice}
-                    </td>
-                    <td
-                      className={`px-8 py-4 text-right font-bold ${
-                        t.profit >= 0 ? "text-emerald-400" : "text-rose-400"
-                      }`}
-                    >
-                      {t.profit >= 0 ? "+" : ""}
-                      {Math.round(t.profit).toLocaleString()}
-                    </td>
-                    <td className="px-8 py-4 text-center">
-                      <button
-                        onClick={() => deleteTrade(t.id)}
-                        className="text-slate-700 hover:text-rose-500 p-2"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
+                  <tr
+                    key={t.id}
+                    className="hover:bg-white/[0.03] transition group h-[76px]"
+                  >
+                    {editingId === t.id ? (
+                      // --- 編輯狀態：共 7 個 <td> ---
+                      <>
+                        <td className="px-8 py-4">
+                          <input
+                            type="date"
+                            className="input-style !py-1 !px-2 text-[11px]"
+                            value={editFormData.date}
+                            onChange={(e) =>
+                              setEditFormData({
+                                ...editFormData,
+                                date: e.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        <td className="px-8 py-4">
+                          <input
+                            className="input-style !py-1 !px-2 font-bold uppercase"
+                            value={editFormData.symbol}
+                            onChange={(e) =>
+                              setEditFormData({
+                                ...editFormData,
+                                symbol: e.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        <td className="px-8 py-4">
+                          <input
+                            type="number"
+                            className="input-style !py-1 !px-2 text-right"
+                            value={editFormData.entryPrice}
+                            onChange={(e) =>
+                              setEditFormData({
+                                ...editFormData,
+                                entryPrice: e.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        <td className="px-8 py-4">
+                          <input
+                            type="number"
+                            className="input-style !py-1 !px-2 text-right"
+                            value={editFormData.exitPrice}
+                            onChange={(e) =>
+                              setEditFormData({
+                                ...editFormData,
+                                exitPrice: e.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        {/* 修正：股數編輯欄位放在這裡，對應標題順序 */}
+                        <td className="px-8 py-4">
+                          <input
+                            type="number"
+                            className="input-style !py-1 !px-2 text-right text-blue-400"
+                            value={editFormData.quantity}
+                            onChange={(e) =>
+                              setEditFormData({
+                                ...editFormData,
+                                quantity: e.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        <td className="px-8 py-4 text-right text-slate-500 italic text-xs">
+                          計算中...
+                        </td>
+                        <td className="px-8 py-4 text-center">
+                          <div className="flex justify-center gap-2">
+                            <button
+                              onClick={() => handleUpdate(t.id)}
+                              className="px-3 py-1 bg-emerald-500/20 text-emerald-400 rounded-md text-xs font-bold hover:bg-emerald-500 hover:text-white transition"
+                            >
+                              儲存
+                            </button>
+                            <button
+                              onClick={() => setEditingId(null)}
+                              className="px-3 py-1 bg-white/5 text-slate-400 rounded-md text-xs hover:bg-white/10 transition"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    ) : (
+                      // --- 正常顯示狀態：共 7 個 <td> ---
+                      <>
+                        <td className="px-8 py-4 text-xs font-mono text-slate-500">
+                          {t.date}
+                        </td>
+                        <td className="px-8 py-4 font-bold text-white text-lg">
+                          {t.symbol}
+                        </td>
+                        <td className="px-8 py-4 text-right font-mono text-slate-400">
+                          {t.entryPrice}
+                        </td>
+                        <td className="px-8 py-4 text-right font-mono text-slate-400">
+                          {t.exitPrice}
+                        </td>
+                        {/* 新增：顯示股數 (補足第 5 欄) */}
+                        <td className="px-8 py-4 text-right font-mono text-blue-400">
+                          {Number(t.quantity).toLocaleString()}
+                        </td>
+                        <td
+                          className={`px-8 py-4 text-right font-mono font-bold text-lg ${
+                            t.profit >= 0 ? "text-emerald-400" : "text-rose-400"
+                          }`}
+                        >
+                          {t.profit >= 0 ? "+" : ""}
+                          {Math.round(t.profit).toLocaleString()}
+                        </td>
+                        <td className="px-8 py-4 text-center">
+                          <div className="flex justify-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => startEdit(t)}
+                              className="p-2 text-slate-400 hover:text-blue-400 transition-colors"
+                            >
+                              編輯
+                            </button>
+                            <button
+                              onClick={() => deleteTrade(t.id)}
+                              className="p-2 text-slate-700 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -700,12 +878,12 @@ export default function App() {
                 </InputGroup>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4 items-start">
                 <InputGroup label="數量(股)">
                   <input
                     required
                     type="number"
-                    className="input-style mt-1"
+                    className="input-style"
                     value={formData.quantity}
                     onChange={(e) =>
                       setFormData({ ...formData, quantity: e.target.value })
@@ -716,7 +894,8 @@ export default function App() {
                   <input
                     required
                     type="date"
-                    className="input-style mt-1"
+                    className="input-style"
+                    style={{ colorScheme: "dark" }} // 強制瀏覽器使用深色日曆面板
                     value={formData.date}
                     onChange={(e) =>
                       setFormData({ ...formData, date: e.target.value })
@@ -754,10 +933,12 @@ function KPIBox({ title, value, trend }) {
     trend > 0 ? "text-emerald-400" : trend < 0 ? "text-rose-400" : "text-white";
   return (
     <div className="bg-[#161920] border border-white/5 rounded-3xl p-5">
-      <div className="text-slate-500 text-[10px] font-bold uppercase mb-1">
+      {/* 修改這裡：text-base 是正常字體大小，text-sm 是稍微小一點點 */}
+      <div className="text-slate-400 text-sm font-bold uppercase mb-2">
         {title}
       </div>
-      <div className={`text-xl font-mono font-bold ${color}`}>{value}</div>
+      {/* 這裡同步放大數值 */}
+      <div className={`text-3xl font-mono font-bold ${color}`}>{value}</div>
     </div>
   );
 }
@@ -769,13 +950,14 @@ function DetailRow({ label, value, color }) {
     </div>
   );
 }
+// 請將 App 括號外的這個函式替換掉
 function InputGroup({ label, children }) {
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col gap-1.5 w-full text-left">
       <label className="text-[10px] uppercase font-bold text-slate-500 ml-1">
         {label}
       </label>
-      {children}
+      <div className="w-full relative">{children}</div>
     </div>
   );
 }
